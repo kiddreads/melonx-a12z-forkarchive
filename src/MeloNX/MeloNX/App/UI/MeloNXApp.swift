@@ -29,7 +29,36 @@ struct MeloNXApp: View {
     @State var showedSetup = false
 
     
-    let environment: [EnvironmentVariable] = [
+    /// A12Z-only knobs. These are the whole point of this clone: one variable at a
+    /// time, flipped from the UI, so a tester can produce a clean A/B on real hardware
+    /// instead of us guessing from source.
+    ///
+    /// MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS is the first suspect. Tier 2 argument
+    /// buffers need Apple GPU family 6 (A13+); A12Z is family 5, so it is Tier 1, where
+    /// the limits collapse to roughly 96/128 textures and 16 samplers. MeloNX upstream
+    /// sets UseMetalArgumentBuffers = true in MVKInitialization.cs; Stossy11 commented
+    /// that line out on 2025-11-02 in a commit titled only "A lot", with no stated
+    /// reason - so this exact setting has already been toggled once by someone chasing
+    /// something. The env var overrides whatever the C# does.
+    @AppStorage("a12z_argument_buffers") static var argumentBuffersEnabled: Bool = false
+    @AppStorage("a12z_metal_private_api") static var metalPrivateAPIEnabled: Bool = true
+
+    var environment: [EnvironmentVariable] {
+        var vars: [EnvironmentVariable] = [
+            EnvironmentVariable(string: "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS",
+                                value: Self.argumentBuffersEnabled ? "1" : "0"),
+        ]
+        if Self.metalPrivateAPIEnabled {
+            vars.append(contentsOf: baseEnvironment)
+        } else {
+            vars.append(contentsOf: baseEnvironment.filter {
+                !$0.string.contains("METAL_PRIVATE_API")
+            })
+        }
+        return vars
+    }
+
+    let baseEnvironment: [EnvironmentVariable] = [
         EnvironmentVariable(string: "MVK_USE_METAL_PRIVATE_API", value: "1"),
         EnvironmentVariable(string: "MVK_CONFIG_USE_METAL_PRIVATE_API", value: "1"),
         EnvironmentVariable(string: "MVK_DEBUG", value: "0"),
@@ -42,6 +71,10 @@ struct MeloNXApp: View {
     let fileManager = FileManager.default
     
     init() {
+        // Log the device profile before anything else touches Metal or SDL. If this
+        // build crashes during startup, this is the last thing written, and it is
+        // exactly the information a bug report needs.
+        NSLog("[a12z] device profile:\n%@", A12Z.report)
         SDL_SetMainReady()
         SDL_iPhoneSetEventPump(SDL_TRUE)
         SDL_Init(SDL_INIT_EVENTS | SDL_INIT_AUDIO)
@@ -50,7 +83,11 @@ struct MeloNXApp: View {
     
     var body: some View {
         Group {
-            if !inSetup {
+            if !A12Z.isA12Z {
+                // Refuse, rather than run degraded. A result from this build is only
+                // evidence about the A12Z if it can only have come from an A12Z.
+                WrongDeviceView()
+            } else if !inSetup {
                 ContentView(viewShown: $viewShown)
                     .onAppear() {
                         
